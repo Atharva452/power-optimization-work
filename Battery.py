@@ -1,70 +1,48 @@
 import numpy as np
-from scipy.optimize import minimize
+from pulp import LpMaximize, LpProblem, LpVariable, lpSum
 
-# Define parameters
-battery_capacity = 100.0  # kWh, maximum capacity of the battery
-battery_min_soc = 10.0    # kWh, minimum state of charge
-battery_max_soc = 100.0   # kWh, maximum state of charge
-charge_efficiency = 0.95  # Efficiency for charging
-discharge_efficiency = 0.95  # Efficiency for discharging
-max_charge_power = 50.0   # kW, maximum charging rate
-max_discharge_power = 50.0  # kW, maximum discharging rate
-time_steps = 24           # Optimization period (e.g., 24 hours)
-time_interval = 1         # Duration of each time step (hours)
-initial_soc = 50.0        # kWh, initial state of charge
+# Parameters
+time_slots = 96  # 96 slots for a day (15 min each)
+battery_capacity = 100  # kWh
+max_power = 100  # kW, max charging/discharging power
+initial_soc = 60  # kWh, initial state-of-charge
+price_forecast = np.random.uniform(10, 20, time_slots)  # Simulated electricity price ($/MWh)
 
-# Simulated demand and renewable generation (kW for each hour)
-power_demand = np.array([40, 50, 60, 55, 45, 50, 70, 80, 65, 50, 40, 30, 35, 45, 55, 65, 75, 85, 70, 60, 50, 40, 30, 20])
-renewable_generation = np.array([30, 40, 50, 60, 55, 50, 60, 70, 60, 50, 40, 30, 25, 30, 40, 50, 60, 70, 65, 55, 45, 35, 25, 15])
+# Decision variables
+charge = [LpVariable(f"charge_{t}", 0, max_power) for t in range(time_slots)]
+discharge = [LpVariable(f"discharge_{t}", 0, max_power) for t in range(time_slots)]
+soc = [LpVariable(f"soc_{t}", 0, battery_capacity) for t in range(time_slots)]
 
-# Define the cost function
-def cost_function(power_flows):
-    charge_power = power_flows[:time_steps]
-    discharge_power = power_flows[time_steps:]
-    grid_import = power_demand - (renewable_generation + discharge_power - charge_power)
-    return np.sum(np.maximum(grid_import, 0))  # Minimize grid import cost
+# Problem definition
+problem = LpProblem("Battery_Storage_Optimization", LpMaximize)
 
-# Define constraints
-def soc_constraints(power_flows):
-    charge_power = power_flows[:time_steps]
-    discharge_power = power_flows[time_steps:]
-    soc = np.zeros(time_steps)
-    soc[0] = initial_soc + (charge_power[0] * charge_efficiency - discharge_power[0] / discharge_efficiency) * time_interval
-    for t in range(1, time_steps):
-        soc[t] = soc[t-1] + (charge_power[t] * charge_efficiency - discharge_power[t] / discharge_efficiency) * time_interval
+# Objective: Maximize profit (or minimize cost)
+problem += lpSum(
+    price_forecast[t] * (discharge[t] - charge[t]) * 0.25  # Revenue from discharge, cost for charge
+    for t in range(time_slots)
+)
 
-    # Constraints: SOC limits, charge/discharge limits
-    return np.concatenate((
-        soc - battery_min_soc,             # SOC should not go below minimum
-        battery_max_soc - soc,             # SOC should not exceed maximum
-        max_charge_power - charge_power,   # Charging power limit
-        charge_power,                      # Charging power >= 0
-        max_discharge_power - discharge_power,  # Discharging power limit
-        discharge_power                    # Discharging power >= 0
-    ))
+# Constraints
+for t in range(time_slots):
+    # SOC balance without efficiency
+    if t == 0:
+        problem += soc[t] == initial_soc + charge[t] - discharge[t]
+    else:
+        problem += soc[t] == soc[t - 1] + charge[t] - discharge[t]
 
-# Bounds for charging and discharging power
-bounds = [(0, max_charge_power) for _ in range(time_steps)] + [(0, max_discharge_power) for _ in range(time_steps)]
+    # SOC must remain within limits
+    problem += soc[t] >= 0
+    problem += soc[t] <= battery_capacity
 
-# Initial guess (no charging or discharging)
-initial_guess = np.zeros(2 * time_steps)
-
-# Solve the optimization problem
-result = minimize(cost_function, initial_guess, bounds=bounds, constraints={'type': 'ineq', 'fun': soc_constraints})
+# Solve the problem
+problem.solve()
 
 # Results
-if result.success:
-    optimal_power_flows = result.x
-    charge_power = optimal_power_flows[:time_steps]
-    discharge_power = optimal_power_flows[time_steps:]
-    soc = np.zeros(time_steps)
-    soc[0] = initial_soc + (charge_power[0] * charge_efficiency - discharge_power[0] / discharge_efficiency) * time_interval
-    for t in range(1, time_steps):
-        soc[t] = soc[t-1] + (charge_power[t] * charge_efficiency - discharge_power[t] / discharge_efficiency) * time_interval
-
-    print("Optimization successful!")
-    print(f"Charge Power (kW): {charge_power}")
-    print(f"Discharge Power (kW): {discharge_power}")
-    print(f"State of Charge (kWh): {soc}")
-else:
-    print("Optimization failed:", result.message)
+print("Status:", problem.status)
+print("Optimized Schedule:")
+for t in range(time_slots):
+    print(
+        f"Slot {t+1}: Charge = {charge[t].varValue:.2f} kW, "
+        f"Discharge = {discharge[t].varValue:.2f} kW, "
+        f"SOC = {soc[t].varValue:.2f} kWh"
+    )
